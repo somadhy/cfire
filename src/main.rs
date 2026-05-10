@@ -103,6 +103,78 @@ fn lock_ignore_ctrl_c() {
     }
 }
 
+/// Quit from stdin bytes: Latin `q`/`Q`, or UTF-8 Cyrillic `й`/`Й` (same key as `q` in Russian layout).
+fn quit_watcher_utf8(quit: Arc<AtomicBool>) {
+    let mut pending_d0 = false;
+    let mut buf = [0u8; 1];
+    loop {
+        let n = match io::stdin().lock().read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+        };
+        if n == 0 {
+            thread::sleep(Duration::from_millis(15));
+            continue;
+        }
+        let b = buf[0];
+        if pending_d0 {
+            pending_d0 = false;
+            if b == 0xB9 || b == 0x99 {
+                quit.store(true, Ordering::Relaxed);
+                return;
+            }
+        }
+        if b == b'q' || b == b'Q' {
+            quit.store(true, Ordering::Relaxed);
+            return;
+        }
+        if b == 0xD0 {
+            pending_d0 = true;
+        }
+    }
+}
+
+/// Windows: virtual key `VK_Q` — same physical key as Latin `q` regardless of layout (RU `й`, etc.).
+#[cfg(windows)]
+fn quit_watcher_windows_console(quit: Arc<AtomicBool>) {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, ReadConsoleInputW, INPUT_RECORD, KEY_EVENT, STD_INPUT_HANDLE,
+    };
+
+    const VK_Q: u16 = 0x51;
+
+    let h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    if h == INVALID_HANDLE_VALUE {
+        quit_watcher_utf8(quit);
+        return;
+    }
+
+    loop {
+        let mut rec: INPUT_RECORD = unsafe { std::mem::zeroed() };
+        let mut n_read = 0u32;
+        let ok = unsafe { ReadConsoleInputW(h, &mut rec, 1, &mut n_read) };
+        if ok == 0 || n_read == 0 {
+            thread::sleep(Duration::from_millis(15));
+            continue;
+        }
+        if rec.EventType as u32 != KEY_EVENT {
+            continue;
+        }
+        let ke = unsafe { rec.Event.KeyEvent };
+        if ke.bKeyDown == 0 {
+            continue;
+        }
+        if ke.wVirtualKeyCode == VK_Q {
+            quit.store(true, Ordering::Relaxed);
+            return;
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -172,18 +244,10 @@ fn main() {
     let quit = Arc::new(AtomicBool::new(false));
     if !lock_mode {
         let quit_t = quit.clone();
-        thread::spawn(move || {
-            let mut buf = [0u8; 1];
-            loop {
-                if let Ok(n) = io::stdin().lock().read(&mut buf) {
-                    if n > 0 && (buf[0] == b'q' || buf[0] == b'Q') {
-                        quit_t.store(true, Ordering::Relaxed);
-                        return;
-                    }
-                }
-                thread::sleep(Duration::from_millis(15));
-            }
-        });
+        #[cfg(windows)]
+        thread::spawn(move || quit_watcher_windows_console(quit_t));
+        #[cfg(not(windows))]
+        thread::spawn(move || quit_watcher_utf8(quit_t));
     }
 
     // ── Main loop ───────────────────────────────────────────────
@@ -222,11 +286,9 @@ fn main() {
 
     {
         let mut out = io::stdout().lock();
-        write!(out, "\x1b[?25h\x1b[H\x1b[2J").ok();
+        // Reset colors/styles, show cursor, clear screen — leave a blank terminal for the shell prompt.
+        write!(out, "\x1b[0m\x1b[?25h\x1b[H\x1b[2J").ok();
         out.flush().ok();
-    }
-    if !lock_mode {
-        println!("cfire stopped  (q to quit)");
     }
 }
 
