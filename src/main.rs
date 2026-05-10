@@ -210,7 +210,7 @@ fn update_grid(
                 continue;
             }
             let current = prev[y][x].heat as i32;
-            let flicker = rng.gen_range(-15..20) as i32;
+            let flicker = rng.gen_range(-8..16) as i32;
             let drift = (max_h - current) / 4;
             next[y][x].heat = (current + drift.max(0) + flicker)
                 .clamp(0, max_h)
@@ -261,7 +261,7 @@ fn compute_heat(
 
     // Updraft — heat rises
     let updraft = below;
-    if updraft < 15 {
+    if updraft < 10 {
         return 0;
     }
 
@@ -281,8 +281,8 @@ fn compute_heat(
     let new_heat = (updraft as f32 * (1.0 + column_boost)).max(cooling) - cooling + side_heat;
     let new_heat = if new_heat < 0.0 { 0.0 } else { new_heat };
 
-    let die: u8 = 1 + (rise * (22.0 + 18.0 * cone_edge)) as u8;
-    if rng.gen_range(0..100) < die {
+    let die: u8 = (rise * (14.0 + 11.0 * cone_edge)) as u8;
+    if die > 0 && rng.gen_range(0..100) < die {
         return 0;
     }
 
@@ -324,14 +324,15 @@ fn render<W: Write>(
 
 fn glyph(h: u8, rng: &mut impl Rng) -> (char, (u8, u8, u8)) {
     let (r, g, b) = color(h);
-    let ch = if h > 200 {
-        ['█', '▓', '▓', '▒'][rng.gen_range(0..4)]
-    } else if h > 150 {
+    // Avoid FULL BLOCK (█): in many fonts it reads as a flat black tile; use shaded blocks instead.
+    let ch = if h > 188 {
+        ['▓', '▓', '▒', '▒', '░', '▓'][rng.gen_range(0..6)]
+    } else if h > 145 {
         ['▓', '▒', '░', '/', '\\', '|'][rng.gen_range(0..6)]
-    } else if h > 80 {
-        ['░', '~', '/', '\\'][rng.gen_range(0..4)]
+    } else if h > 72 {
+        ['░', '~', '/', '\\', '░'][rng.gen_range(0..5)]
     } else {
-        ['░', '·', ' '][rng.gen_range(0..3)]
+        ['░', '·', ':', '░', '·'][rng.gen_range(0..5)]
     };
     (ch, (r, g, b))
 }
@@ -340,16 +341,18 @@ fn color(h: u8) -> (u8, u8, u8) {
     let t = h as f64 / 255.0;
     let (r, gv, b) = if t < 0.2 {
         let s = t / 0.2;
-        (40.0 + 100.0 * s, 5.0 + 5.0 * s, 0.0)
+        // Visible embers without muddy black
+        (78.0 + 82.0 * s, 14.0 + 18.0 * s, 1.0 + 5.0 * s)
     } else if t < 0.45 {
         let s = (t - 0.2) / 0.25;
-        (140.0 + 85.0 * s, 10.0 + 40.0 * s, 0.0)
+        (155.0 + 85.0 * s, 32.0 + 58.0 * s, 6.0 + 14.0 * s)
     } else if t < 0.7 {
         let s = (t - 0.45) / 0.25;
-        (225.0 + 30.0 * s, 50.0 + 130.0 * s, 0.0)
+        (240.0 + 15.0 * s, 90.0 + 88.0 * s, 20.0 + 48.0 * s)
     } else {
         let s = (t - 0.7) / 0.3;
-        (255.0, 180.0 + 75.0 * s, 0.0 + 40.0 * s)
+        // Peaks stay orange–amber, not paper-white
+        (255.0, 128.0 + 72.0 * s, 28.0 + 48.0 * s)
     };
     (r as u8, gv as u8, b as u8)
 }
