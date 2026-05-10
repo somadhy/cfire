@@ -1,0 +1,12 @@
+[package]
+name = "cfire"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rand = "0.8"
+terminal_size = "0.4"
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Foundation"] }
