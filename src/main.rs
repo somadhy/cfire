@@ -69,11 +69,72 @@ struct Cell {
     heat: u8,
 }
 
+fn print_usage() {
+    println!(
+        "\
+Usage: cfire [OPTIONS]
+
+Options:
+    -L, --lock    Screen lock (cmatrix -L style): no q to quit; Ctrl+C ignored;
+                  stop from another session: kill <PID>
+    -h, --help    Print this help"
+    );
+}
+
+#[cfg(unix)]
+fn lock_ignore_signals() {
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+        libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+    }
+}
+
+#[cfg(windows)]
+fn lock_ignore_ctrl_c() {
+    use windows_sys::Win32::Foundation::TRUE;
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+    unsafe extern "system" fn handler(_ctrl_type: u32) -> i32 {
+        TRUE
+    }
+
+    unsafe {
+        let _ = SetConsoleCtrlHandler(Some(handler), TRUE);
+    }
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_usage();
+        return;
+    }
+    let lock_mode = args.iter().any(|a| a == "--lock" || a == "-L");
+
+    #[cfg(unix)]
+    if lock_mode {
+        lock_ignore_signals();
+    }
+    #[cfg(windows)]
+    if lock_mode {
+        lock_ignore_ctrl_c();
+    }
+
+    if lock_mode {
+        let pid = std::process::id();
+        eprintln!(
+            "cfire: lock mode — PID {pid}. Exit from another tty/session: kill {pid}   (like cmatrix -L)"
+        );
+    }
+
     #[cfg(windows)]
     enable_windows_virtual_terminal();
     #[cfg(windows)]
-    let saved_stdin_mode = setup_windows_stdin();
+    let saved_stdin_mode = if !lock_mode {
+        setup_windows_stdin()
+    } else {
+        None
+    };
 
     // ── Auto-detect terminal size ───────────────────────────────
     let (tc, tr) = terminal_size::terminal_size()
@@ -99,31 +160,37 @@ fn main() {
     let fuel_profile = build_fuel_profile(cols, draw_rows);
     let fuel_profile = Arc::new(fuel_profile);
 
-    // ── Raw-mode on Unix (before stdin reader so each key is available immediately) ──
+    // ── Raw-mode on Unix (only when reading `q` in a background thread) ──
     #[cfg(unix)]
-    let saved_termios = setup_raw_unix();
+    let saved_termios = if !lock_mode {
+        setup_raw_unix()
+    } else {
+        None
+    };
 
-    // ── Key watcher ──────────────────────────────────────────────
+    // ── Key watcher (disabled in --lock: exit only via kill from elsewhere) ──
     let quit = Arc::new(AtomicBool::new(false));
-    let quit_t = quit.clone();
-    thread::spawn(move || {
-        let mut buf = [0u8; 1];
-        loop {
-            if let Ok(n) = io::stdin().lock().read(&mut buf) {
-                if n > 0 && (buf[0] == b'q' || buf[0] == b'Q') {
-                    quit_t.store(true, Ordering::Relaxed);
-                    return;
+    if !lock_mode {
+        let quit_t = quit.clone();
+        thread::spawn(move || {
+            let mut buf = [0u8; 1];
+            loop {
+                if let Ok(n) = io::stdin().lock().read(&mut buf) {
+                    if n > 0 && (buf[0] == b'q' || buf[0] == b'Q') {
+                        quit_t.store(true, Ordering::Relaxed);
+                        return;
+                    }
                 }
+                thread::sleep(Duration::from_millis(15));
             }
-            thread::sleep(Duration::from_millis(15));
-        }
-    });
+        });
+    }
 
     // ── Main loop ───────────────────────────────────────────────
     let target_frame = Duration::from_millis(90);
 
-    for _ in 0.. {
-        if quit.load(Ordering::Relaxed) {
+    loop {
+        if !lock_mode && quit.load(Ordering::Relaxed) {
             break;
         }
         let t = Instant::now();
@@ -158,7 +225,9 @@ fn main() {
         write!(out, "\x1b[?25h\x1b[H\x1b[2J").ok();
         out.flush().ok();
     }
-    println!("cfire stopped  (q to quit)");
+    if !lock_mode {
+        println!("cfire stopped  (q to quit)");
+    }
 }
 
 // ======================== Fuel profile ==========================
