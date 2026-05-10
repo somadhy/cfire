@@ -24,6 +24,46 @@ fn enable_windows_virtual_terminal() {
     }
 }
 
+/// Raw-ish stdin so `Read` returns each key without waiting for Enter (required for `q`).
+#[cfg(windows)]
+fn setup_windows_stdin() -> Option<u32> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
+        STD_INPUT_HANDLE,
+    };
+    unsafe {
+        let h = GetStdHandle(STD_INPUT_HANDLE);
+        if h == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut mode = 0u32;
+        if GetConsoleMode(h, &mut mode) == 0 {
+            return None;
+        }
+        let old = mode;
+        let new_mode = mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+        if SetConsoleMode(h, new_mode) == 0 {
+            return None;
+        }
+        Some(old)
+    }
+}
+
+#[cfg(windows)]
+fn restore_windows_stdin(old: Option<u32>) {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE};
+    if let Some(m) = old {
+        unsafe {
+            let h = GetStdHandle(STD_INPUT_HANDLE);
+            if h != INVALID_HANDLE_VALUE {
+                let _ = SetConsoleMode(h, m);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Cell {
     heat: u8,
@@ -32,6 +72,8 @@ struct Cell {
 fn main() {
     #[cfg(windows)]
     enable_windows_virtual_terminal();
+    #[cfg(windows)]
+    let saved_stdin_mode = setup_windows_stdin();
 
     // ── Auto-detect terminal size ───────────────────────────────
     let (tc, tr) = terminal_size::terminal_size()
@@ -40,8 +82,8 @@ fn main() {
     let cols = tc.max(40);
     let rows = tr.max(16);
 
-    // Reserve ~5 lines so the shell prompt doesn't vanish.
-    let draw_rows = rows.saturating_sub(5).max(10);
+    // Use full terminal height so the fuel bed sits on the bottom row.
+    let draw_rows = rows.max(10);
 
     // ── Hidden cursor + clear ────────────────────────────────────
     {
@@ -57,6 +99,10 @@ fn main() {
     let fuel_profile = build_fuel_profile(cols, draw_rows);
     let fuel_profile = Arc::new(fuel_profile);
 
+    // ── Raw-mode on Unix (before stdin reader so each key is available immediately) ──
+    #[cfg(unix)]
+    let saved_termios = setup_raw_unix();
+
     // ── Key watcher ──────────────────────────────────────────────
     let quit = Arc::new(AtomicBool::new(false));
     let quit_t = quit.clone();
@@ -64,18 +110,14 @@ fn main() {
         let mut buf = [0u8; 1];
         loop {
             if let Ok(n) = io::stdin().lock().read(&mut buf) {
-                if n > 0 && (buf[0] as char == 'q' || buf[0] as char == 'Q') {
+                if n > 0 && (buf[0] == b'q' || buf[0] == b'Q') {
                     quit_t.store(true, Ordering::Relaxed);
                     return;
                 }
             }
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(15));
         }
     });
-
-    // ── Raw-mode on Unix ────────────────────────────────────────
-    #[cfg(unix)]
-    let saved_termios = setup_raw_unix();
 
     // ── Main loop ───────────────────────────────────────────────
     let target_frame = Duration::from_millis(90);
@@ -108,6 +150,8 @@ fn main() {
     // ── Restore terminal ────────────────────────────────────────
     #[cfg(unix)]
     restore_unix(saved_termios);
+    #[cfg(windows)]
+    restore_windows_stdin(saved_stdin_mode);
 
     {
         let mut out = io::stdout().lock();
@@ -125,18 +169,21 @@ struct FuelProfile {
 }
 
 fn build_fuel_profile(cols: usize, _draw_rows: usize) -> FuelProfile {
-    let center = cols as f64 / 2.0;
-    let spread = cols as f64 / 5.0;
-    let max_fuel_heat: f64 = 220.0;
+    let center = (cols.saturating_sub(1)) as f64 / 2.0;
+    let w = cols as f64;
+    // Wide warm bed for coals at the sides + tighter, taller peak so the core reads as a bonfire pile.
+    let wide_span = (w * 0.41).max(6.0);
+    let peak_span = (w * 0.088).max(2.0);
 
     let mut max_heat = vec![0u8; cols];
     for i in 0..cols {
         let x = i as f64;
-        let h1 = (-0.4 * ((x - center) / spread).powi(2)).exp() * max_fuel_heat;
-        let h2 = (-0.8 * ((x - center * 0.72) / (spread * 0.6)).powi(2)).exp() * max_fuel_heat * 0.65;
-        let h3 = (-0.8 * ((x - center * 1.28) / (spread * 0.6)).powi(2)).exp() * max_fuel_heat * 0.65;
-        let combined = h1 + h2 + h3;
-        max_heat[i] = combined.clamp(0.0, 255.0) as u8;
+        let dw = (x - center) / wide_span;
+        let dp = (x - center) / peak_span;
+        let floor = (-0.44 * dw * dw).exp() * 148.0;
+        let peak = (-1.05 * dp * dp).exp() * 125.0;
+        let h = (floor + peak).min(255.0);
+        max_heat[i] = h as u8;
     }
     FuelProfile { max_heat }
 }
@@ -187,26 +234,46 @@ fn compute_heat(
     rows: usize,
     rng: &mut impl Rng,
 ) -> u8 {
-    let below = heat(prev, x, y + 1, cols, rows);
+    let ember_start = rows.saturating_sub(EMBER_DEPTH);
+    let fire_h = ember_start.max(1);
+    // 0 at the flame base (just above coals), 1 at the top of the terminal
+    let rise =
+        (ember_start.saturating_sub(1).saturating_sub(y)) as f32 / fire_h as f32;
+
+    let cx = (cols.saturating_sub(1)) as f32 / 2.0;
+    // 0 = screen center column, 1 = far left/right (short rim of the fire)
+    let edge = ((x as f32 - cx).abs() / (cx + 1.0)).min(1.0);
+    // Cone: near the coals (low rise) flames can span wide; toward the top, sides cool faster → tall central spike (campfire, not flat grill).
+    let cone_edge = (edge * (0.13 + 0.87 * rise.powf(1.03))).min(1.0);
+
+    let drift_prob =
+        (rise as f64 * 0.36 * (edge as f64).powf(0.82)).clamp(0.0, 0.40);
+    let sample_x = if rise > 0.18 && rng.gen_bool(drift_prob) {
+        let sx = x as isize + rng.gen_range(-1..=1);
+        sx.clamp(0, cols as isize - 1) as usize
+    } else {
+        x
+    };
+
+    let below = heat(prev, sample_x, y + 1, cols, rows);
     let left = heat(prev, x.saturating_sub(1), y, cols, rows);
     let right = heat(prev, (x + 1).min(cols - 1), y, cols, rows);
 
     // Updraft — heat rises
     let updraft = below;
-    if updraft < 20 {
+    if updraft < 15 {
         return 0;
     }
 
-    // Side heat blending
-    let side_heat = (left as f32 + right as f32) * 0.1;
+    let side_heat = (left as f32 + right as f32) * 0.105 * (1.0 - 0.14 * edge);
 
-    // Cooling with height
-    let height_ratio = y as f32 / rows.max(1) as f32;
-    let cooling = (8.0 + height_ratio * 22.0 + rng.gen_range(-2.0..4.0)).max(2.0);
+    let cooling_base = (3.5 + rise * 21.0 + rng.gen_range(-2.0..4.0)).max(1.7);
+    // cone_edge: strongest cooling off-axis and high up → pronounced vertical core
+    let cooling = cooling_base * (0.52 + 1.12 * cone_edge * cone_edge);
 
-    // Convection column: hot columns rise with less cooling
-    let column_boost: f32 = if updraft > 170 {
-        rng.gen_range(0.0..0.2)
+    let center_lift = (1.0 - edge).powf(2.15);
+    let column_boost: f32 = if updraft > 108 {
+        rng.gen_range(0.0..0.24) + center_lift * rng.gen_range(0.0..0.78)
     } else {
         0.0
     };
@@ -214,8 +281,7 @@ fn compute_heat(
     let new_heat = (updraft as f32 * (1.0 + column_boost)).max(cooling) - cooling + side_heat;
     let new_heat = if new_heat < 0.0 { 0.0 } else { new_heat };
 
-    // Random extinction
-    let die: u8 = 2 + (height_ratio * 28.0) as u8;
+    let die: u8 = 1 + (rise * (22.0 + 18.0 * cone_edge)) as u8;
     if rng.gen_range(0..100) < die {
         return 0;
     }
