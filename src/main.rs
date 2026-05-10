@@ -1,15 +1,15 @@
 use rand::Rng;
 use std::io::{self, Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 fn enable_windows_virtual_terminal() {
     use windows_sys::Win32::System::Console::{
-        GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
-        STD_OUTPUT_HANDLE,
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE,
+        SetConsoleMode,
     };
     unsafe {
         let h = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -29,8 +29,8 @@ fn enable_windows_virtual_terminal() {
 fn setup_windows_stdin() -> Option<u32> {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::{
-        GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
-        STD_INPUT_HANDLE,
+        ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
+        SetConsoleMode,
     };
     unsafe {
         let h = GetStdHandle(STD_INPUT_HANDLE);
@@ -53,7 +53,7 @@ fn setup_windows_stdin() -> Option<u32> {
 #[cfg(windows)]
 fn restore_windows_stdin(old: Option<u32>) {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE, SetConsoleMode};
     if let Some(m) = old {
         unsafe {
             let h = GetStdHandle(STD_INPUT_HANDLE);
@@ -142,7 +142,7 @@ fn quit_watcher_utf8(quit: Arc<AtomicBool>) {
 fn quit_watcher_windows_console(quit: Arc<AtomicBool>) {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::{
-        GetStdHandle, ReadConsoleInputW, INPUT_RECORD, KEY_EVENT, STD_INPUT_HANDLE,
+        GetStdHandle, INPUT_RECORD, KEY_EVENT, ReadConsoleInputW, STD_INPUT_HANDLE,
     };
 
     const VK_Q: u16 = 0x51;
@@ -234,11 +234,7 @@ fn main() {
 
     // ── Raw-mode on Unix (only when reading `q` in a background thread) ──
     #[cfg(unix)]
-    let saved_termios = if !lock_mode {
-        setup_raw_unix()
-    } else {
-        None
-    };
+    let saved_termios = if !lock_mode { setup_raw_unix() } else { None };
 
     // ── Key watcher (disabled in --lock: exit only via kill from elsewhere) ──
     let quit = Arc::new(AtomicBool::new(false));
@@ -307,14 +303,14 @@ fn build_fuel_profile(cols: usize, _draw_rows: usize) -> FuelProfile {
     let peak_span = (w * 0.088).max(2.0);
 
     let mut max_heat = vec![0u8; cols];
-    for i in 0..cols {
+    for (i, slot) in max_heat.iter_mut().enumerate() {
         let x = i as f64;
         let dw = (x - center) / wide_span;
         let dp = (x - center) / peak_span;
         let floor = (-0.44 * dw * dw).exp() * 148.0;
         let peak = (-1.05 * dp * dp).exp() * 125.0;
         let h = (floor + peak).min(255.0);
-        max_heat[i] = h as u8;
+        *slot = h as u8;
     }
     FuelProfile { max_heat }
 }
@@ -341,18 +337,16 @@ fn update_grid(
                 continue;
             }
             let current = prev[y][x].heat as i32;
-            let flicker = rng.gen_range(-8..16) as i32;
+            let flicker = rng.gen_range(-8..16);
             let drift = (max_h - current) / 4;
-            next[y][x].heat = (current + drift.max(0) + flicker)
-                .clamp(0, max_h)
-                .max(0) as u8;
+            next[y][x].heat = (current + drift.max(0) + flicker).clamp(0, max_h).max(0) as u8;
         }
     }
 
     // ── Fire zone (everything above embers) ──┬───────────────────
     for y in (0..ember_start).rev() {
-        for x in 0..cols {
-            next[y][x].heat = compute_heat(prev, x, y, cols, rows, rng);
+        for (x, cell) in next[y].iter_mut().enumerate().take(cols) {
+            cell.heat = compute_heat(prev, x, y, cols, rows, rng);
         }
     }
 }
@@ -368,8 +362,7 @@ fn compute_heat(
     let ember_start = rows.saturating_sub(EMBER_DEPTH);
     let fire_h = ember_start.max(1);
     // 0 at the flame base (just above coals), 1 at the top of the terminal
-    let rise =
-        (ember_start.saturating_sub(1).saturating_sub(y)) as f32 / fire_h as f32;
+    let rise = (ember_start.saturating_sub(1).saturating_sub(y)) as f32 / fire_h as f32;
 
     let cx = (cols.saturating_sub(1)) as f32 / 2.0;
     // 0 = screen center column, 1 = far left/right (short rim of the fire)
@@ -377,8 +370,7 @@ fn compute_heat(
     // Cone: near the coals (low rise) flames can span wide; toward the top, sides cool faster → tall central spike (campfire, not flat grill).
     let cone_edge = (edge * (0.13 + 0.87 * rise.powf(1.03))).min(1.0);
 
-    let drift_prob =
-        (rise as f64 * 0.36 * (edge as f64).powf(0.82)).clamp(0.0, 0.40);
+    let drift_prob = (rise as f64 * 0.36 * (edge as f64).powf(0.82)).clamp(0.0, 0.40);
     let sample_x = if rise > 0.18 && rng.gen_bool(drift_prob) {
         let sx = x as isize + rng.gen_range(-1..=1);
         sx.clamp(0, cols as isize - 1) as usize
@@ -430,17 +422,11 @@ fn heat(g: &[Vec<Cell>], x: usize, y: usize, c: usize, r: usize) -> u8 {
 
 // ======================== Render ================================
 
-fn render<W: Write>(
-    out: &mut W,
-    grid: &[Vec<Cell>],
-    cols: usize,
-    rows: usize,
-    rng: &mut impl Rng,
-) {
+fn render<W: Write>(out: &mut W, grid: &[Vec<Cell>], cols: usize, rows: usize, rng: &mut impl Rng) {
     write!(out, "\x1b[H").ok();
-    for y in 0..rows {
-        for x in 0..cols {
-            let h = grid[y][x].heat;
+    for row in grid.iter().take(rows) {
+        for cell in row.iter().take(cols) {
+            let h = cell.heat;
             if h == 0 {
                 write!(out, " ").ok();
                 continue;
@@ -448,7 +434,7 @@ fn render<W: Write>(
             let (ch, (r, g, b)) = glyph(h, rng);
             write!(out, "\x1b[38;2;{};{};{}m{}", r, g, b, ch).ok();
         }
-        write!(out, "\x1b[0m\x1b[K\n").ok();
+        writeln!(out, "\x1b[0m\x1b[K").ok();
     }
     out.flush().ok();
 }
