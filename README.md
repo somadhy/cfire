@@ -51,4 +51,4 @@ cfire -L
 
 ## Лицензия
 
-MIT
+MIT — полный текст в файле [LICENSE](LICENSE).
