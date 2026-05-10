@@ -30,19 +30,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Ручной запуск только с ветки main
+      - name: Ручной запуск только с ветки master
         if: github.event_name == 'workflow_dispatch'
         run: |
-          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-            echo "Запускайте workflow только из ветки main."
+          if [ "$GITHUB_REF" != "refs/heads/master" ]; then
+            echo "Запускайте workflow только из ветки master."
             exit 1
           fi
 
-      - name: Коммит тега входит в историю main
+      - name: Коммит тега входит в историю master
         if: github.event_name == 'push'
         run: |
-          git fetch origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          git fetch origin master
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master
 
       - uses: dtolnay/rust-toolchain@stable
         with:
